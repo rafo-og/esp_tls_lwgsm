@@ -18,6 +18,8 @@
 #include <errno.h>
 #include "esp_log.h"
 
+#include "esp_lwgsm.h"
+
 #ifdef CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
 #include "esp_crt_bundle.h"
 #endif
@@ -117,7 +119,8 @@ esp_err_t esp_create_mbedtls_handle(const char *hostname, size_t hostlen, const 
         esp_ret = ESP_ERR_MBEDTLS_SSL_SETUP_FAILED;
         goto exit;
     }
-    mbedtls_ssl_set_bio(&tls->ssl, &tls->server_fd, mbedtls_net_send, mbedtls_net_recv, NULL);
+    // mbedtls_ssl_set_bio(&tls->ssl, &tls->server_fd, mbedtls_net_send, mbedtls_net_recv, NULL);
+    mbedtls_ssl_set_bio(&tls->ssl, &tls->server_fd, esp_lwgsm_mbedtls_send, esp_lwgsm_mbedtls_recv, NULL);
 
     return ESP_OK;
 
@@ -253,10 +256,10 @@ void esp_mbedtls_conn_delete(esp_tls_t *tls)
 {
     if (tls != NULL) {
         esp_mbedtls_cleanup(tls);
-        if (tls->is_tls) {
-            mbedtls_net_free(&tls->server_fd);
-            tls->sockfd = tls->server_fd.fd;
-        }
+        // if (tls->is_tls) {
+        //     mbedtls_net_free(&tls->server_fd);
+        //     tls->sockfd = tls->server_fd.fd;
+        // }
     }
 }
 
