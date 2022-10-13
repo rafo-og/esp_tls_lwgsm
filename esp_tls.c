@@ -9,7 +9,9 @@
 #include <unistd.h>
 
 #include <sys/types.h>
-// #include <sys/socket.h>
+#if CONFIG_ESP_TLS_USING_LWIP
+#include <sys/socket.h>
+#endif
 #include <netdb.h>
 
 #include <http_parser.h>
@@ -17,9 +19,14 @@
 #include "esp_tls_error_capture_internal.h"
 #include <errno.h>
 
+#if CONFIG_ESP_TLS_USING_LWGSM
 #include "esp_lwgsm.h"
+static const char *TAG = "esp_tls_lwgsm";
+#endif
 
-static const char *TAG = "lwgsm_esp_tls";
+#if CONFIG_ESP_TLS_USING_LWIP
+static const char *TAG = "esp_tls_lwip";
+#endif
 
 #ifdef CONFIG_ESP_TLS_USING_MBEDTLS
 #include "esp_tls_mbedtls.h"
@@ -85,15 +92,20 @@ static esp_err_t esp_tls_handshake(esp_tls_t *tls, const esp_tls_cfg_t *cfg)
 
 static ssize_t tcp_read(esp_tls_t *tls, char *data, size_t datalen)
 {
-    // return recv(tls->sockfd, data, datalen, 0);
+#if CONFIG_ESP_TLS_USING_LWGSM
     return esp_lwgsm_recv(tls->sockfd, data, datalen, 0);
+#else
+    return recv(tls->sockfd, data, datalen, 0);
+#endif
 }
 
 static ssize_t tcp_write(esp_tls_t *tls, const char *data, size_t datalen)
 {
-    // return send(tls->sockfd, data, datalen, 0);
-    ESP_LOGI(TAG, "Ahora aqui vare");
+#if CONFIG_ESP_TLS_USING_LWGSM
     return esp_lwgsm_send(tls->sockfd, data, datalen, 0);
+#else
+    return send(tls->sockfd, data, datalen, 0);
+#endif
 }
 
 /**
@@ -110,8 +122,11 @@ int esp_tls_conn_destroy(esp_tls_t *tls)
         int ret = 0;
         _esp_tls_conn_delete(tls);
         if (tls->sockfd >= 0) {
-            // ret = close(tls->sockfd);
+#if CONFIG_ESP_TLS_USING_LWGSM
             ret = esp_lwgsm_close(tls->sockfd);
+#else
+            ret = close(tls->sockfd);
+#endif
             if(!ret) { tls->sockfd = -1; }
         }
         esp_tls_internal_event_tracker_destroy(tls->error_handle);
@@ -134,11 +149,10 @@ esp_tls_t *esp_tls_init(void)
     }
     _esp_tls_net_init(tls);
     tls->sockfd = -1;
-
     return tls;
 }
 
-#if ESP_TLS_LEGACY
+#if CONFIG_ESP_TLS_USING_LWIP
 static esp_err_t esp_tls_hostname_to_fd(const char *host, size_t hostlen, int port, struct sockaddr_storage *address, int* fd)
 {
     struct addrinfo *address_info;
@@ -193,6 +207,13 @@ static esp_err_t esp_tls_hostname_to_fd(const char *host, size_t hostlen, int po
     freeaddrinfo(address_info);
     return ESP_OK;
 }
+
+static void ms_to_timeval(int timeout_ms, struct timeval *tv)
+{
+    tv->tv_sec = timeout_ms / 1000;
+    tv->tv_usec = (timeout_ms % 1000) * 1000;
+}
+
 static esp_err_t esp_tls_set_socket_options(int fd, const esp_tls_cfg_t *cfg)
 {
     if (cfg) {
@@ -244,6 +265,7 @@ static esp_err_t esp_tls_set_socket_options(int fd, const esp_tls_cfg_t *cfg)
     }
     return ESP_OK;
 }
+
 static esp_err_t esp_tls_set_socket_non_blocking(int fd, bool non_blocking)
 {
     int flags;
@@ -264,22 +286,105 @@ static esp_err_t esp_tls_set_socket_non_blocking(int fd, bool non_blocking)
     }
     return ESP_OK;
 }
-static void ms_to_timeval(int timeout_ms, struct timeval *tv)
-{
-    tv->tv_sec = timeout_ms / 1000;
-    tv->tv_usec = (timeout_ms % 1000) * 1000;
-}
 #endif
 
 static inline esp_err_t tcp_connect(const char *host, int hostlen, int port, const esp_tls_cfg_t *cfg, esp_tls_error_handle_t error_handle, int *sockfd)
-{  
+{
+#if CONFIG_ESP_TLS_USING_LWIP
+    struct sockaddr_storage address;
+#endif /* CONFIG_ESP_TLS_USING_LWIP */
     int fd;
     esp_err_t ret;
 
+#if CONFIG_ESP_TLS_USING_LWGSM
     ret = esp_lwgsm_connect(&fd, host, port, cfg->non_block ? 0 : 1);
     *sockfd = fd;
 
     return ret;
+#else
+    ret = esp_tls_hostname_to_fd(host, hostlen, port, &address, &fd);
+    if (ret != ESP_OK) {
+        ESP_INT_EVENT_TRACKER_CAPTURE(error_handle, ESP_TLS_ERR_TYPE_SYSTEM, errno);
+        return ret;
+    }
+
+    // Set timeout options, keep-alive options and bind device options if configured
+    ret = esp_tls_set_socket_options(fd, cfg);
+    if (ret != ESP_OK) {
+        goto err;
+    }
+
+    // Set to non block before connecting to better control connection timeout
+    ret = esp_tls_set_socket_non_blocking(fd, true);
+    if (ret != ESP_OK) {
+        goto err;
+    }
+
+    ret = ESP_ERR_ESP_TLS_FAILED_CONNECT_TO_HOST;
+    ESP_LOGD(TAG, "[sock=%d] Connecting to server. HOST: %s, Port: %d", fd, host, port);
+    if (connect(fd, (struct sockaddr *)&address, sizeof(struct sockaddr)) < 0) {
+        if (errno == EINPROGRESS) {
+            fd_set fdset;
+            struct timeval tv = { .tv_usec = 0, .tv_sec = 10 }; // Default connection timeout is 10 s
+
+            if (cfg && cfg->non_block) {
+                // Non-blocking mode -> just return successfully at this stage
+                *sockfd = fd;
+                return ESP_OK;
+            }
+
+            if ( cfg && cfg->timeout_ms > 0 ) {
+                ms_to_timeval(cfg->timeout_ms, &tv);
+            }
+            FD_ZERO(&fdset);
+            FD_SET(fd, &fdset);
+
+            int res = select(fd+1, NULL, &fdset, NULL, &tv);
+            if (res < 0) {
+                ESP_LOGE(TAG, "[sock=%d] select() error: %s", fd, strerror(errno));
+                ESP_INT_EVENT_TRACKER_CAPTURE(error_handle, ESP_TLS_ERR_TYPE_SYSTEM, errno);
+                goto err;
+            }
+            else if (res == 0) {
+                ESP_LOGE(TAG, "[sock=%d] select() timeout", fd);
+                ret = ESP_ERR_ESP_TLS_CONNECTION_TIMEOUT;
+                goto err;
+            } else {
+                int sockerr;
+                socklen_t len = (socklen_t)sizeof(int);
+
+                if (getsockopt(fd, SOL_SOCKET, SO_ERROR, (void*)(&sockerr), &len) < 0) {
+                    ESP_LOGE(TAG, "[sock=%d] getsockopt() error: %s", fd, strerror(errno));
+                    ret = ESP_ERR_ESP_TLS_SOCKET_SETOPT_FAILED;
+                    goto err;
+                }
+                else if (sockerr) {
+                    ESP_INT_EVENT_TRACKER_CAPTURE(error_handle, ESP_TLS_ERR_TYPE_SYSTEM, sockerr);
+                    ESP_LOGE(TAG, "[sock=%d] delayed connect error: %s", fd, strerror(sockerr));
+                    goto err;
+                }
+            }
+        } else {
+            ESP_LOGE(TAG, "[sock=%d] connect() error: %s", fd, strerror(errno));
+            goto err;
+        }
+    }
+
+    if (cfg && cfg->non_block == false) {
+        // reset back to blocking mode (unless non_block configured)
+        ret = esp_tls_set_socket_non_blocking(fd, false);
+        if (ret != ESP_OK) {
+            goto err;
+        }
+    }
+
+    *sockfd = fd;
+    return ESP_OK;
+
+err:
+    close(fd);
+    return ret;
+#endif /* CONFIG_ESP_TLS_USING_LWGSM */
 }
 
 static int esp_tls_low_level_conn(const char *hostname, int hostlen, int port, const esp_tls_cfg_t *cfg, esp_tls_t *tls)
@@ -292,84 +397,87 @@ static int esp_tls_low_level_conn(const char *hostname, int hostlen, int port, c
     /* These states are used to keep a tab on connection progress in case of non-blocking connect,
     and in case of blocking connect these cases will get executed one after the other */
     switch (tls->conn_state) {
-    case ESP_TLS_INIT:
-        tls->sockfd = -1;
-        if (cfg != NULL && cfg->is_plain_tcp == false) {
-            _esp_tls_net_init(tls);
-            tls->is_tls = true;
-        }
-        if ((esp_ret = tcp_connect(hostname, hostlen, port, cfg, tls->error_handle, &tls->sockfd)) != ESP_OK) {
-            ESP_INT_EVENT_TRACKER_CAPTURE(tls->error_handle, ESP_TLS_ERR_TYPE_ESP, esp_ret);
-            return -1;
-        }
-        if (tls->is_tls == false) {
-            tls->read = tcp_read;
-            tls->write = tcp_write;
-            ESP_LOGD(TAG, "non-tls connection established");
-            return 1;
-        }
-        if (cfg && cfg->non_block) {
-            FD_ZERO(&tls->rset);
-            FD_SET(tls->sockfd, &tls->rset);
-            tls->wset = tls->rset;
-        }
-        tls->conn_state = ESP_TLS_CONNECTING;
-    /* falls through */
-    case ESP_TLS_CONNECTING:
-        if (cfg && cfg->non_block) {
-            ESP_LOGD(TAG, "connecting...");
-
-            // struct timeval tv;
-            // ms_to_timeval(cfg->timeout_ms, &tv);
-            // /* In case of non-blocking I/O, we use the select() API to check whether
-            //    connection has been established or not*/
-            // if (select(tls->sockfd + 1, &tls->rset, &tls->wset, NULL,
-            //            cfg->timeout_ms>0 ? &tv : NULL) == 0) {
-            //     ESP_LOGD(TAG, "select() timed out");
-            //     return 0;
-            // }
-            // if (FD_ISSET(tls->sockfd, &tls->rset) || FD_ISSET(tls->sockfd, &tls->wset)) {
-            //     int error;
-            //     socklen_t len = sizeof(error);
-            //     /* pending error check */
-            //     if (getsockopt(tls->sockfd, SOL_SOCKET, SO_ERROR, &error, &len) < 0) {
-            //         ESP_LOGD(TAG, "Non blocking connect failed");
-            //         ESP_INT_EVENT_TRACKER_CAPTURE(tls->error_handle, ESP_TLS_ERR_TYPE_SYSTEM, errno);
-            //         ESP_INT_EVENT_TRACKER_CAPTURE(tls->error_handle, ESP_TLS_ERR_TYPE_ESP, ESP_ERR_ESP_TLS_SOCKET_SETOPT_FAILED);
-            //         tls->conn_state = ESP_TLS_FAIL;
-            //         return -1;
-            //     }
-            // }
-
-            /* In case of non-blocking I/O, we use the select() API to check whether
-               connection has been established or not*/
-            if(!esp_lwgsm_is_connected(tls->sockfd, cfg->timeout_ms)){
-                ESP_LOGD(TAG, "select() timed out");
-                return 0;
+        case ESP_TLS_INIT:
+            tls->sockfd = -1;
+            if (cfg != NULL && cfg->is_plain_tcp == false) {
+                _esp_tls_net_init(tls);
+                tls->is_tls = true;
             }
-        }
-        /* By now, the connection has been established */
-        esp_ret = create_ssl_handle(hostname, hostlen, cfg, tls);
-        if (esp_ret != ESP_OK) {
-            ESP_LOGE(TAG, "create_ssl_handle failed");
-            ESP_INT_EVENT_TRACKER_CAPTURE(tls->error_handle, ESP_TLS_ERR_TYPE_ESP, esp_ret);
-            tls->conn_state = ESP_TLS_FAIL;
-            return -1;
-        }
-        tls->read = _esp_tls_read;
-        tls->write = _esp_tls_write;
-        tls->conn_state = ESP_TLS_HANDSHAKE;
-    /* falls through */
-    case ESP_TLS_HANDSHAKE:
-        ESP_LOGD(TAG, "handshake in progress...");
-        return esp_tls_handshake(tls, cfg);
-        break;
-    case ESP_TLS_FAIL:
-        ESP_LOGE(TAG, "failed to open a new connection");;
-        break;
-    default:
-        ESP_LOGE(TAG, "invalid esp-tls state");
-        break;
+            if ((esp_ret = tcp_connect(hostname, hostlen, port, cfg, tls->error_handle, &tls->sockfd)) != ESP_OK) {
+                ESP_INT_EVENT_TRACKER_CAPTURE(tls->error_handle, ESP_TLS_ERR_TYPE_ESP, esp_ret);
+                return -1;
+            }
+            if (tls->is_tls == false) {
+                tls->read = tcp_read;
+                tls->write = tcp_write;
+                ESP_LOGD(TAG, "non-tls connection established");
+                return 1;
+            }
+            if (cfg && cfg->non_block) {
+                FD_ZERO(&tls->rset);
+                FD_SET(tls->sockfd, &tls->rset);
+                tls->wset = tls->rset;
+            }
+            tls->conn_state = ESP_TLS_CONNECTING;
+        /* falls through */
+        case ESP_TLS_CONNECTING:
+            if (cfg && cfg->non_block) {
+                ESP_LOGD(TAG, "connecting...");
+    #if CONFIG_ESP_TLS_USING_LWIP
+                struct timeval tv;
+                ms_to_timeval(cfg->timeout_ms, &tv);
+    #endif
+    #if CONFIG_ESP_TLS_USING_LWGSM
+                /* In case of non-blocking I/O, we use the esp_lwgsm_is_connected() API to check whether
+                connection has been established or not*/
+                if(!esp_lwgsm_is_connected(tls->sockfd, cfg->timeout_ms)){
+                    ESP_LOGD(TAG, "esp_lwgsm_is_connected() timed out");
+                    return 0;
+                }
+    #else
+                /* In case of non-blocking I/O, we use the select() API to check whether
+                connection has been established or not*/
+                if (select(tls->sockfd + 1, &tls->rset, &tls->wset, NULL,
+                        cfg->timeout_ms>0 ? &tv : NULL) == 0) {
+                    ESP_LOGD(TAG, "select() timed out");
+                    return 0;
+                }
+                if (FD_ISSET(tls->sockfd, &tls->rset) || FD_ISSET(tls->sockfd, &tls->wset)) {
+                    int error;
+                    socklen_t len = sizeof(error);
+                    /* pending error check */
+                    if (getsockopt(tls->sockfd, SOL_SOCKET, SO_ERROR, &error, &len) < 0) {
+                        ESP_LOGD(TAG, "Non blocking connect failed");
+                        ESP_INT_EVENT_TRACKER_CAPTURE(tls->error_handle, ESP_TLS_ERR_TYPE_SYSTEM, errno);
+                        ESP_INT_EVENT_TRACKER_CAPTURE(tls->error_handle, ESP_TLS_ERR_TYPE_ESP, ESP_ERR_ESP_TLS_SOCKET_SETOPT_FAILED);
+                        tls->conn_state = ESP_TLS_FAIL;
+                        return -1;
+                    }
+                }
+    #endif
+            }
+            /* By now, the connection has been established */
+            esp_ret = create_ssl_handle(hostname, hostlen, cfg, tls);
+            if (esp_ret != ESP_OK) {
+                ESP_LOGE(TAG, "create_ssl_handle failed");
+                ESP_INT_EVENT_TRACKER_CAPTURE(tls->error_handle, ESP_TLS_ERR_TYPE_ESP, esp_ret);
+                tls->conn_state = ESP_TLS_FAIL;
+                return -1;
+            }
+            tls->read = _esp_tls_read;
+            tls->write = _esp_tls_write;
+            tls->conn_state = ESP_TLS_HANDSHAKE;
+        /* falls through */
+        case ESP_TLS_HANDSHAKE:
+            ESP_LOGD(TAG, "handshake in progress...");
+            return esp_tls_handshake(tls, cfg);
+            break;
+        case ESP_TLS_FAIL:
+            ESP_LOGE(TAG, "failed to open a new connection");;
+            break;
+        default:
+            ESP_LOGE(TAG, "invalid esp-tls state");
+            break;
     }
     return -1;
 }

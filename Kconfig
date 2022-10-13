@@ -1,4 +1,15 @@
-menu "ESP-TLS"
+menu "ESP-TLS-LWGSM"
+    choice ESP_TLS_NETWORK_CHOOSE
+        prompt "Choose between LWIP TCP/IP stack and LWGSM stack"
+        default ESP_TLS_USING_LWGSM
+        help
+            ESP_TLS could use the LWIP stack to use WiFi or Ethernet as network transport layer or LWGSM stack to
+            use GSM as transport layer.
+        config ESP_TLS_USING_LWGSM
+            bool "LwGSM"
+        config ESP_TLS_USING_LWIP
+            bool "LwIP"
+    endchoice
     choice ESP_TLS_LIBRARY_CHOOSE
         prompt "Choose SSL/TLS library for ESP-TLS (See help for more Info)"
         default ESP_TLS_USING_MBEDTLS

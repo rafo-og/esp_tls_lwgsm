@@ -9,7 +9,9 @@
 #include <unistd.h>
 
 #include <sys/types.h>
+#if CONFIG_ESP_TLS_USING_LWIP
 #include <sys/socket.h>
+#endif
 #include <netdb.h>
 
 #include <http_parser.h>
@@ -18,7 +20,9 @@
 #include <errno.h>
 #include "esp_log.h"
 
+#if CONFIG_ESP_TLS_USING_LWGSM
 #include "esp_lwgsm.h"
+#endif
 
 #ifdef CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
 #include "esp_crt_bundle.h"
@@ -119,8 +123,11 @@ esp_err_t esp_create_mbedtls_handle(const char *hostname, size_t hostlen, const 
         esp_ret = ESP_ERR_MBEDTLS_SSL_SETUP_FAILED;
         goto exit;
     }
-    // mbedtls_ssl_set_bio(&tls->ssl, &tls->server_fd, mbedtls_net_send, mbedtls_net_recv, NULL);
+#if CONFIG_ESP_TLS_USING_LWIP
+    mbedtls_ssl_set_bio(&tls->ssl, &tls->server_fd, mbedtls_net_send, mbedtls_net_recv, NULL);
+#else
     mbedtls_ssl_set_bio(&tls->ssl, &tls->server_fd, esp_lwgsm_mbedtls_send, esp_lwgsm_mbedtls_recv, NULL);
+#endif
 
     return ESP_OK;
 
@@ -256,10 +263,12 @@ void esp_mbedtls_conn_delete(esp_tls_t *tls)
 {
     if (tls != NULL) {
         esp_mbedtls_cleanup(tls);
-        // if (tls->is_tls) {
-        //     mbedtls_net_free(&tls->server_fd);
-        //     tls->sockfd = tls->server_fd.fd;
-        // }
+#if CONFIG_ESP_TLS_USING_LWIP
+        if (tls->is_tls) {
+            mbedtls_net_free(&tls->server_fd);
+            tls->sockfd = tls->server_fd.fd;
+        }
+#endif
     }
 }
 
