@@ -298,6 +298,7 @@ static inline esp_err_t tcp_connect(const char *host, int hostlen, int port, con
 
 #if CONFIG_ESP_TLS_USING_LWGSM
     ret = esp_lwgsm_connect(&fd, host, port, cfg->non_block ? 0 : 1);
+    esp_lwgsm_set_recv_timeout(fd, cfg->timeout_ms);
     *sockfd = fd;
 
     return ret;
