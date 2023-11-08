@@ -263,12 +263,10 @@ void esp_mbedtls_conn_delete(esp_tls_t *tls)
 {
     if (tls != NULL) {
         esp_mbedtls_cleanup(tls);
-#if CONFIG_ESP_TLS_USING_LWIP
         if (tls->is_tls) {
             mbedtls_net_free(&tls->server_fd);
             tls->sockfd = tls->server_fd.fd;
         }
-#endif
     }
 }
 

@@ -120,15 +120,17 @@ int esp_tls_conn_destroy(esp_tls_t *tls)
 {
     if (tls != NULL) {
         int ret = 0;
+#if CONFIG_ESP_TLS_USING_LWGSM
+        if (tls->sockfd >= 0) {
+            ret = esp_lwgsm_close(tls->sockfd);
+        }
+        _esp_tls_conn_delete(tls);
+#else
         _esp_tls_conn_delete(tls);
         if (tls->sockfd >= 0) {
-#if CONFIG_ESP_TLS_USING_LWGSM
-            ret = esp_lwgsm_close(tls->sockfd);
-#else
             ret = close(tls->sockfd);
-#endif
-            if(!ret) { tls->sockfd = -1; }
         }
+#endif
         esp_tls_internal_event_tracker_destroy(tls->error_handle);
         free(tls);
         return ret;
