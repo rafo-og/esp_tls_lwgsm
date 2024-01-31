@@ -521,7 +521,7 @@ esp_tls_t *esp_tls_conn_new(const char *hostname, int hostlen, int port, const e
             uint32_t expired = xTaskGetTickCount() - start;
             if (expired >= timeout_ticks) {
                 esp_tls_conn_delete(tls);
-                ESP_LOGE(TAG, "Failed to open new connection in specified timeout");
+                ESP_LOGE(TAG, "Failed to open new connection in specified timeout (%d)", cfg->timeout_ms);
                 return NULL;
             }
         }
@@ -545,7 +545,7 @@ int esp_tls_conn_new_sync(const char *hostname, int hostlen, int port, const esp
             size_t timeout_ticks = pdMS_TO_TICKS(cfg->timeout_ms);
             uint32_t expired = xTaskGetTickCount() - start;
             if (expired >= timeout_ticks) {
-                ESP_LOGW(TAG, "Failed to open new connection in specified timeout");
+                ESP_LOGW(TAG, "Failed to open new connection in specified timeout (%d)", cfg->timeout_ms);
                 ESP_INT_EVENT_TRACKER_CAPTURE(tls->error_handle, ESP_TLS_ERR_TYPE_ESP, ESP_ERR_ESP_TLS_CONNECTION_TIMEOUT);
                 return 0;
             }
